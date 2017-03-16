@@ -1,0 +1,595 @@
+/*
+	Local Client.java
+*/
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.util.PriorityQueue;
+import java.util.Queue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+
+public class Client 
+{
+	public static Queue<String> queue = null;
+	public static Queue<String> rqueue = null;
+	public static void main(String args[]) throws Exception
+	{
+		String fileName=null;
+		String nthreads=null;
+		Options options = new Options();
+		CommandLineParser parser = new DefaultParser();
+		options.addOption( "s", true, "Queue Name");
+		options.addOption( "w", true, "Workload File");
+		options.addOption( "t", true, "Threads");
+		try 
+		{   
+			CommandLine line = parser.parse(options,args);
+		    if(line.hasOption("s") && line.hasOption("w") && line.hasOption("t")) 
+		    {
+		    	fileName = line.getOptionValue("w");
+		    	nthreads = line.getOptionValue("t");	        
+		    }
+		    else
+		    {
+		    	System.out.println("Please Enter the Arguments");
+		    }
+		}
+		catch(ParseException exp) 
+		{
+		    System.out.println( "Unexpected exception:" + exp.getMessage() );
+		}
+		
+		ExecutorService executor = Executors.newFixedThreadPool(Integer.parseInt(nthreads));
+		BufferedReader br = new BufferedReader(new FileReader(fileName));
+		queue = new PriorityQueue<String>();
+		queue.clear();
+		rqueue = new PriorityQueue<String>();
+		rqueue.clear();
+		
+		long start = System.currentTimeMillis();
+		String s = br.readLine();
+		
+		int lines=0;
+		while(s!=null)
+		{
+			lines++;
+			queue.add(s);
+			s = br.readLine();
+		}
+		
+		for(int j=0;j<lines;j++)
+		{
+			Runnable worker = new Worker(queue.poll());
+			executor.execute(worker);
+		}
+		executor.shutdown();
+		while (!executor.isTerminated()) 
+		{
+		}
+		long end = System.currentTimeMillis();
+		long time = (end-start)/1000;
+		System.out.println("Time: "+time+" secs.");
+		BufferedWriter bw = new BufferedWriter(new FileWriter("Response.txt"));
+		while(!rqueue.isEmpty())
+		{
+			bw.write(rqueue.poll());
+		}
+		br.close();
+		bw.close();
+	}
+	static class Worker extends Thread
+	{
+		String task = null;
+		public Worker(String task)
+		{
+			this.task = task;
+		}
+
+		public void run()
+		{
+			try
+			{
+				String str[] = task.split(" ");
+				Thread.sleep(Long.parseLong(str[1]));
+				rqueue.add("0");
+			}
+			catch(Exception e)
+			{
+				rqueue.add("1");
+			}
+		}
+	}	
+}
+
+/*
+	Remote Client.java
+*/
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.util.List;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.profile.ProfileCredentialsProvider;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.Regions;
+import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClient;
+import com.amazonaws.services.sqs.model.CreateQueueRequest;
+import com.amazonaws.services.sqs.model.DeleteMessageRequest;
+import com.amazonaws.services.sqs.model.Message;
+import com.amazonaws.services.sqs.model.PurgeQueueRequest;
+import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
+import com.amazonaws.services.sqs.model.SendMessageRequest;
+
+public class Client 
+{
+	static AmazonDynamoDBClient dynamoDB;
+    public static void main(String[] args) throws Exception 
+    {
+    	String queueName = null;
+		String wname=null;
+		Options options = new Options();
+		CommandLineParser parser = new DefaultParser();
+		options.addOption( "s", true, "Queue Name");
+		options.addOption( "w", true, "Workload File");
+		
+		try 
+		{   
+			CommandLine line = parser.parse(options,args);
+		    if(line.hasOption("s") && line.hasOption("w")) 
+		    {
+		    	queueName = line.getOptionValue("s");
+		    	wname = line.getOptionValue("w");
+		    }
+		    else
+		    {
+		    	System.out.println("Please Enter the Arguments");
+		    }
+		}
+		catch(ParseException exp) 
+		{
+		    System.out.println( "Unexpected exception:" + exp.getMessage() );
+		}
+		
+        AWSCredentials credentials = null;
+        try 
+        {
+            credentials = new ProfileCredentialsProvider("default").getCredentials();
+        } 
+        catch (Exception e) 
+        {
+            throw new AmazonClientException(
+                    "Cannot load the credentials from the credential profiles file. " +
+                    "Please make sure that your credentials file is at the correct " +
+                    "location (C:\\Users\\Shorabh\\.aws\\credentials), and is in valid format.",
+                    e);
+        }
+        
+        System.out.println("===========================================");
+        System.out.println("CLIENT IS RUNNING");
+        System.out.println("===========================================\n");
+        
+        File filename = new File(wname);
+		BufferedReader br = new BufferedReader(new FileReader(filename));
+		
+		/*SQS and DynamoDB Creation*/
+        
+        AmazonSQS sqs = new AmazonSQSClient(credentials);
+        Region usEast1 = Region.getRegion(Regions.US_EAST_1);
+        sqs.setRegion(usEast1);
+        
+        try 
+        {   
+            //Create a queue
+            CreateQueueRequest createQueueRequest = new CreateQueueRequest(queueName);
+            String queueUrlReq = sqs.createQueue(createQueueRequest).getQueueUrl();
+            System.out.println("Created a new SQS queue called " + queueName + " .\n");
+            long start = System.currentTimeMillis();
+            //Put messages
+            String s = br.readLine();
+    		int lines=0;
+    		while(s!=null)
+    		{
+    			sqs.sendMessage(new SendMessageRequest(queueUrlReq, s+" "+lines));
+    			lines++;
+    			s = br.readLine();
+    		}        
+    		System.out.println("Uploaded Messages into " + queueName + " .\n");
+    		long middle = System.currentTimeMillis();
+    		System.out.println((middle-start)/1000);
+    		
+    		//Create Response Queue
+    		CreateQueueRequest createQueueResponse = new CreateQueueRequest(queueName+"_Response");
+            String queueUrlResp = sqs.createQueue(createQueueResponse).getQueueUrl();
+            ReceiveMessageRequest receiveMessageRequest = new ReceiveMessageRequest(queueUrlResp);
+            List<Message> messages = null;
+            int count=0;
+            BufferedWriter bw = new BufferedWriter(new FileWriter("Response.txt"));
+            while(true)
+            {
+            	messages = sqs.receiveMessage(receiveMessageRequest).getMessages();
+            	if(!messages.isEmpty())
+            	{
+            		bw.write(messages.get(0).getBody()+"\n");
+            		sqs.deleteMessage(new DeleteMessageRequest(queueUrlResp,messages.get(0).getReceiptHandle()));
+            		count++;
+            		if(count==lines)
+            			break;
+            	}
+            }
+            long end = System.currentTimeMillis();
+    		long time = (end-start)/1000;
+    		System.out.println("Time Taken By Client: "+time+" secs.");
+    		bw.close();
+    		sqs.purgeQueue(new PurgeQueueRequest(queueUrlReq));
+    		sqs.purgeQueue(new PurgeQueueRequest(queueUrlResp));
+        } 
+        catch (AmazonServiceException ase) 
+        {
+            System.out.println("Caught an AmazonServiceException, which means your request made it " +
+                    "to Amazon SQS, but was rejected with an error response for some reason.");
+            System.out.println("Error Message:    " + ase.getMessage());
+            System.out.println("HTTP Status Code: " + ase.getStatusCode());
+            
+            System.out.println("AWS Error Code:   " + ase.getErrorCode());
+            System.out.println("Error Type:       " + ase.getErrorType());
+            System.out.println("Request ID:       " + ase.getRequestId());
+        } 
+        catch (AmazonClientException ace) 
+        {
+            System.out.println("Caught an AmazonClientException, which means the client encountered " +
+                    "a serious internal problem while trying to communicate with SQS, such as not " +
+                    "being able to access the network.");
+            System.out.println("Error Message: " + ace.getMessage());
+        }
+        br.close();
+        
+    }
+}
+
+/*
+	Remote Worker.java
+*/
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.profile.ProfileCredentialsProvider;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.Regions;
+import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient;
+import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
+import com.amazonaws.services.dynamodbv2.model.AttributeValue;
+import com.amazonaws.services.dynamodbv2.model.CreateTableRequest;
+//import com.amazonaws.services.dynamodbv2.model.DeleteTableRequest;
+import com.amazonaws.services.dynamodbv2.model.GetItemResult;
+import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
+import com.amazonaws.services.dynamodbv2.model.KeyType;
+import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
+import com.amazonaws.services.dynamodbv2.model.PutItemRequest;
+import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
+import com.amazonaws.services.dynamodbv2.util.TableUtils;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClient;
+import com.amazonaws.services.sqs.model.CreateQueueRequest;
+import com.amazonaws.services.sqs.model.DeleteMessageRequest;
+import com.amazonaws.services.sqs.model.Message;
+import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
+import com.amazonaws.services.sqs.model.SendMessageRequest;
+
+public class Worker 
+{
+	static AmazonDynamoDBClient dynamoDB;
+	public static void main(String[] args) throws Exception 
+	{
+		String queueName = null;
+		Options options = new Options();
+		CommandLineParser parser = new DefaultParser();
+		options.addOption( "s", true, "Queue Name");
+		options.addOption( "t", true, "Workload File");
+
+		try 
+		{   
+			CommandLine line = parser.parse(options,args);
+			if(line.hasOption("s") && line.hasOption("t")) 
+			{
+				queueName = line.getOptionValue("s");
+			}
+			else
+			{
+				System.out.println("Please Enter the Arguments");
+			}
+		}
+		catch(ParseException exp) 
+		{
+			System.out.println( "Unexpected exception:" + exp.getMessage() );
+		}
+
+		AWSCredentials credentials = null;
+		try 
+		{
+			credentials = new ProfileCredentialsProvider("default").getCredentials();
+		} 
+		catch (Exception e) 
+		{
+			throw new AmazonClientException(
+					"Cannot load the credentials from the credential profiles file. " +
+							"Please make sure that your credentials file is at the correct " +
+							"location (C:\\Users\\Shorabh\\.aws\\credentials), and is in valid format.",
+							e);
+		}
+
+		System.out.println("===========================================");
+		System.out.println("WORKER IS RUNNING");
+		System.out.println("===========================================\n");
+
+		dynamoDB = new AmazonDynamoDBClient(credentials);
+		Region usEast2 = Region.getRegion(Regions.US_EAST_1);
+		dynamoDB.setRegion(usEast2);
+
+		AmazonSQS sqs = new AmazonSQSClient(credentials);
+
+		CreateQueueRequest createQueueResponse = new CreateQueueRequest(queueName+"_Response");
+		String queueUrl2 = sqs.createQueue(createQueueResponse).getQueueUrl();
+
+		try
+		{
+			String tableName = queueName;
+			// Create table if it does not exist yet
+			// Create a table with a primary hash key named 'name', which holds a string
+			CreateTableRequest createTableRequest = new CreateTableRequest().withTableName(tableName)
+					.withKeySchema(new KeySchemaElement().withAttributeName("name").withKeyType(KeyType.HASH))
+					.withAttributeDefinitions(new AttributeDefinition().withAttributeName("name").withAttributeType(ScalarAttributeType.S))
+					.withProvisionedThroughput(new ProvisionedThroughput().withReadCapacityUnits(10L).withWriteCapacityUnits(10L));
+			TableUtils.createTableIfNotExists(dynamoDB, createTableRequest);
+			TableUtils.waitUntilActive(dynamoDB, tableName);
+			
+			CreateQueueRequest createQueueRequest = new CreateQueueRequest(queueName);
+			String queueUrl = sqs.createQueue(createQueueRequest).getQueueUrl();
+			ReceiveMessageRequest receiveMessageRequest = new ReceiveMessageRequest(queueUrl);
+			List<Message> messages = null;
+			String str[]=null;
+			Map<String,AttributeValue> search = new HashMap<String,AttributeValue>();
+			
+			long start = System.currentTimeMillis();
+			
+			while(true)
+			{
+				messages = sqs.receiveMessage(receiveMessageRequest).getMessages();
+				if(!messages.isEmpty())
+				{
+					str = messages.get(0).getBody().split(" ");
+					search.clear();
+					search.put("name", new AttributeValue(str[2]));
+					GetItemResult getItemResult = dynamoDB.getItem(tableName,search);
+					try
+					{
+						getItemResult.getItem().containsKey(str[2]);
+					}
+					catch(Exception e)
+					{
+						dynamoDB.putItem(new PutItemRequest(tableName, newItem(str[2],str[0])));
+						Thread.sleep(Long.parseLong(str[1]));
+						sqs.sendMessage(new SendMessageRequest(queueUrl2, "0"));
+					}
+					try
+					{	
+						// Delete a message
+						sqs.deleteMessage(new DeleteMessageRequest(queueUrl, messages.get(0).getReceiptHandle()));
+					}
+					catch(Exception e)
+					{
+						break;
+					}
+				}
+				else
+				{}
+			}
+			long end = System.currentTimeMillis();
+			long time = (end-start)/1000;
+			System.out.println("Time Taken By Worker: "+time+" secs.");
+			//dynamoDB.deleteTable(new DeleteTableRequest(tableName));
+		}
+		catch (AmazonServiceException ase) 
+		{
+			sqs.sendMessage(new SendMessageRequest(queueUrl2, "1"));
+			System.out.println("Caught an AmazonServiceException, which means your request made it " +
+					"to Amazon SQS, but was rejected with an error response for some reason.");
+			System.out.println("Error Message:    " + ase.getMessage());
+			System.out.println("HTTP Status Code: " + ase.getStatusCode());
+
+			System.out.println("AWS Error Code:   " + ase.getErrorCode());
+			System.out.println("Error Type:       " + ase.getErrorType());
+			System.out.println("Request ID:       " + ase.getRequestId());
+		} 
+		catch (AmazonClientException ace) 
+		{
+			sqs.sendMessage(new SendMessageRequest(queueUrl2, "1"));
+			System.out.println("Caught an AmazonClientException, which means the client encountered " +
+					"a serious internal problem while trying to communicate with SQS, such as not " +
+					"being able to access the network.");
+			System.out.println("Error Message: " + ace.getMessage());
+		}
+	}
+
+	private static Map<String, AttributeValue> newItem(String name,String value) 
+	{
+		Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
+		item.put("name", new AttributeValue(name));
+		item.put("value", new AttributeValue(value));
+		return item;
+	}
+}
+
+
+/*
+	Animoto.java
+*/
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.net.URL;
+
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.HttpMethod;
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.profile.ProfileCredentialsProvider;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.Regions;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
+import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClient;
+import com.amazonaws.services.sqs.model.CreateQueueRequest;
+import com.amazonaws.services.sqs.model.SendMessageRequest;
+
+public class Animoto 
+{
+	static AmazonS3 s3;
+	static String bucketName = "shorabh";
+	
+	public static void main(String[] args) throws IOException 
+	{
+		AWSCredentials credentials = null;
+        try 
+        {
+            credentials = new ProfileCredentialsProvider("default").getCredentials();
+        } 
+        catch (Exception e) 
+        {
+            throw new AmazonClientException(
+                    "Cannot load the credentials from the credential profiles file. " +
+                    "Please make sure that your credentials file is at the correct " +
+                    "location (C:\\Users\\Shorabh\\.aws\\credentials), and is in valid format.",
+                    e);
+        }
+		AmazonSQS sqs = new AmazonSQSClient(credentials);
+        Region usEast1 = Region.getRegion(Regions.US_EAST_1);
+        sqs.setRegion(usEast1);
+        
+        s3 = new AmazonS3Client(credentials);
+        sqs.setRegion(usEast1);
+        
+        //Create a queue
+        CreateQueueRequest createQueueRequest = new CreateQueueRequest("ANI");
+        String myQueueUrl = sqs.createQueue(createQueueRequest).getQueueUrl();
+		
+        BufferedReader br = null;
+		try
+		{
+			br = new BufferedReader(new FileReader("Animoto.txt"));
+			String s = br.readLine();
+			Runtime runtime = Runtime.getRuntime();
+			while(s!=null)
+			{
+				Process p = runtime.exec("wget "+ s);
+        		p.waitFor();
+        		s = br.readLine();
+			}
+			Process rename = runtime.exec("./rename.sh");
+			rename.waitFor();
+			
+			runtime.exec("ffmpeg -f image2 -i img%03d.jpg movie.mpg");
+			
+			File movie = new File("movie.mpg");	
+	        
+			System.out.println("Creating bucket " + bucketName + "\n");
+        	s3.createBucket(bucketName);
+			
+			URL url = put(movie.getName(), movie);
+			
+			sqs.sendMessage(new SendMessageRequest(myQueueUrl, url.toString()));
+		}
+		catch(InterruptedException e)
+		{}
+		catch(AmazonServiceException ase) 
+		{
+			sqs.sendMessage(new SendMessageRequest(myQueueUrl, "1"));
+            System.out.println("Caught an AmazonServiceException, which means your request made it "
+                    + "to Amazon S3, but was rejected with an error response for some reason.");
+            System.out.println("Error Message:    " + ase.getMessage());
+            System.out.println("HTTP Status Code: " + ase.getStatusCode());
+            System.out.println("AWS Error Code:   " + ase.getErrorCode());
+            System.out.println("Error Type:       " + ase.getErrorType());
+            System.out.println("Request ID:       " + ase.getRequestId());
+        } 
+		catch (AmazonClientException ace) 
+		{
+			sqs.sendMessage(new SendMessageRequest(myQueueUrl, "1"));
+            System.out.println("Caught an AmazonClientException, which means the client encountered "
+                    + "a serious internal problem while trying to communicate with S3, "
+                    + "such as not being able to access the network.");
+            System.out.println("Error Message: " + ace.getMessage());
+        }
+		br.close();
+	}
+	
+	public static URL put(String key, File movie)
+	{
+		try
+		{
+			System.out.println("Upload to S3 from a file\n");
+            s3.putObject(new PutObjectRequest(bucketName, key, movie));
+            
+            System.out.println("Generating pre-signed URL.");
+			java.util.Date expire = new java.util.Date();
+			long milliSeconds = expire.getTime();
+			milliSeconds += 1000 * 60 * 60 * 24; // Add 1 day.
+			expire.setTime(milliSeconds);
+
+			GeneratePresignedUrlRequest generatePresignedUrlRequest = 
+				    new GeneratePresignedUrlRequest(bucketName, key);
+			generatePresignedUrlRequest.setMethod(HttpMethod.GET); 
+			generatePresignedUrlRequest.setExpiration(expire);
+
+			return s3.generatePresignedUrl(generatePresignedUrlRequest);        
+		}
+		catch(AmazonServiceException ase) 
+		{
+            System.out.println("Caught an AmazonServiceException, which means your request made it "
+                    + "to Amazon S3, but was rejected with an error response for some reason.");
+            System.out.println("Error Message:    " + ase.getMessage());
+            System.out.println("HTTP Status Code: " + ase.getStatusCode());
+            System.out.println("AWS Error Code:   " + ase.getErrorCode());
+            System.out.println("Error Type:       " + ase.getErrorType());
+            System.out.println("Request ID:       " + ase.getRequestId());
+        } 
+		catch (AmazonClientException ace) 
+		{
+            System.out.println("Caught an AmazonClientException, which means the client encountered "
+                    + "a serious internal problem while trying to communicate with S3, "
+                    + "such as not being able to access the network.");
+            System.out.println("Error Message: " + ace.getMessage());
+        }
+		return null;
+	}
+}
